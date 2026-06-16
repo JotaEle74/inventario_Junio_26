@@ -1,0 +1,1794 @@
+<?php
+
+namespace App\Http\Controllers\Inventariado;
+
+use App\Http\Controllers\BaseController;
+use App\Http\Requests\Activo\StoreActivoRequest;
+use App\Http\Requests\Activo\UpdateActivoRequest;
+use App\Http\Resources\ActivoResource;
+use App\Http\Resources\MovimientoActivoResource;
+use App\Models\Inventariado\Activo;
+use App\Models\Inventariado\Software;
+use App\Traits\ExportsAssets;
+use Exception;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Carbon;
+use App\Models\User;
+use App\Models\Inventariado\Area;
+use App\Models\Edificio;
+use PDF;
+use Mpdf\Mpdf;
+use Illuminate\Support\Facades\Validator;
+use App\Exports\ActivosExport;
+use Maatwebsite\Excel\Facades\Excel;
+use Symfony\Component\HttpFoundation\StreamedResponse;
+use App\Models\Inventariado\Acta;
+use App\Models\Export;
+use App\Jobs\ExportActivosJob;
+use App\Jobs\ExportActasJob;
+use App\Jobs\ExportHistorialActivoJob;
+
+class ActivosController extends BaseController
+{
+    use ExportsAssets;
+
+    public function inventariador(Request $request)
+    {
+        try {
+            $query = DB::table('activos as a')
+                ->leftJoin('activo_user as au', 'a.id', '=', 'au.activo_id')
+                ->join('areas as ar', 'a.area_id', '=', 'ar.id')
+                ->whereNull('au.activo_id') // 👈 activos sin asignación
+                ->whereNull('a.deleted_at')//add deleted_at
+                ->whereNull('au.deleted_at')//add deleted_at
+                //->where('ar.oficina_id', $request->oficina_id)
+                //->select('a.codigo', 'a.numero_serie', 'a.denominacion', 'ar.aula')
+                ->orderBy('ar.aula', 'desc')
+                ->orderBy('a.id', 'desc');
+            if($request->has('oficina_id')){
+                $query->select('a.codigo', 'a.numero_serie', 'a.denominacion', 'ar.aula', 'ar.codigo as arcodigo', 'ar.oficina_id');
+                $query->where('ar.oficina_id', $request->oficina_id);
+                return $query->get();
+            }
+            $query->select('a.codigo', 'a.numero_serie', 'a.denominacion', 'ar.aula');
+            if($request->has('area_id')){
+                $query->where('a.area_id', $request->area_id);
+            }
+            return $query->paginate(15);
+            //$query=Activo::with(['catalogo:id,denominacion', 'responsable:id,name', 'area.oficina']);
+            //$query=Activo::with(['responsable:id,name', 'area.oficina']);
+            //$user = $request->user();
+            //$oficinaIds = $user->oficinas->pluck('id');
+            //$query->where('dniInventariador', $user->dni);
+            //$query->where('dniInventariador', null);
+            //$query->whereHas('area', function ($q) use ($oficinaIds) {
+            //    $q->whereIn('oficina_id', $oficinaIds);
+            //});
+            //$query->select('id', 'codigo', 'numero_serie', 'color', 'denominacion', 'responsable_id');
+            //$query->where('area_id',$request->area_id);
+            //$perPage = $request->integer('per_page', 15);
+            //$activos = $query->paginate($perPage);
+            //return $activos;
+        } catch (Exception $e) {
+            Log::error('Error al listar activos: ' . $e->getMessage());
+            return $this->handleException($e);
+        }
+    }
+    public function index(Request $request)//: AnonymousResourceCollection|JsonResponse
+    {
+        try {
+            $query = Activo::with(['area.oficina', 'responsable', 'edificio', 'users'])->whereNull('deleted_at');
+            $user = $request->user();
+            if($request->has('codigo')){
+                $query->where('codigo', 'like', $request->codigo);
+                $activos = $query->get();
+                return ActivoResource::collection($activos);
+            }
+            if ($user && ($user->hasRole('responsable_departamento') || $user->hasRole('usuario_consulta'))) {
+                $query->where('responsable_id', $user->id);
+            }
+
+            if($request->has('search')){
+                $search = $request->search;
+                $query->where(function($q) use ($search){
+                    $q->orWhere('codigo', 'like', "%{$search}%")
+                      ->orWhere('numero_serie', 'like', "%{$search}%")
+                      ->orWhere('denominacion', 'like', "%{$search}%")
+                      ->orWhere('descripcion', 'like', "%{$search}%")
+                      ->orWhere('marca', 'like', "%{$search}%")
+                      ->orWhere('modelo', 'like', "%{$search}%")
+                      ->orWhereHas('responsable', function($q) use ($search) {
+                          $q->where('name', 'like', "%{$search}%");
+                      });
+                });
+            }
+
+            if($request->has('area_id')){
+                $query->where('area_id', $request->area_id);
+            }
+
+            if($request->has('oficina_id')){
+                $query->whereHas('area', function($q) use ($request) {
+                    $q->where('oficina_id', $request->oficina_id);
+                });
+            }
+
+            if($request->has('estado')){
+                $query->where('estado', $request->estado);
+            }
+
+            if($request->has('responsable_id')) {
+                $query->where('responsable_id', $request->responsable_id);
+            }
+
+            if ($request->has('sort_by')) {
+                $sortDirection = $request->boolean('desc', false) ? 'desc' : 'asc';
+                $query->orderBy($request->sort_by, $sortDirection);
+            } else {
+                $query->orderBy('id');
+            }
+
+            if($request->per_page === null){
+                //$query->has('users');
+                $query->orderBy('id', 'desc');
+                $activos = $query->get();
+                //$activos = $query->skip(10)->get();
+            }
+            else {
+                $perPage = $request->integer('per_page', 15);
+                $activos = $query->paginate($perPage);
+            }
+            return ActivoResource::collection($activos);
+        } catch (Exception $e) {
+            Log::error('Error al listar activos: ' . $e->getMessage());
+            return $this->handleException($e);
+        }
+    }
+
+    public function dashboard(Request $request)//: JsonResponse
+    {
+        try {
+            $user = $request->user();
+            $isRestrictedUser = $user && ($user->hasRole('responsable_departamento') || $user->hasRole('usuario_consulta'));
+
+            $activosPorDia = DB::table('activo_user as au')
+            ->select(DB::raw('DATE(au.fecha) as fecha'), DB::raw('COUNT(DISTINCT au.activo_id) as total'))
+            ->whereNull('au.deleted_at')
+            ->groupBy(DB::raw('DATE(au.fecha)'))
+            ->orderBy(DB::raw('DATE(au.fecha)'), 'asc')
+            ->get();
+            $activosPorGrupoDia = DB::table('activo_user as au')
+            ->select(
+                DB::raw('DATE(au.fecha) as fecha'),
+                'au.grupo',
+                DB::raw('COUNT(DISTINCT au.activo_id) as total')
+            )
+            ->whereDate('au.fecha', today())
+            ->whereNull('au.deleted_at')
+            ->whereNotNull('au.grupo') 
+            ->groupBy(DB::raw('DATE(au.fecha)'), 'au.grupo')
+            ->orderBy('au.grupo')
+            ->get();
+            $activosPorOficina = DB::table('activos as a')
+            ->join('areas as ar', 'a.area_id', '=', 'ar.id')
+            ->join('oficinas as of', 'ar.oficina_id', '=', 'of.id') // corregido
+            ->leftJoin('activo_user as au', 'a.id', '=', 'au.activo_id') // left join para incluir los no registrados
+            ->whereNull('a.deleted_at')//add deleted_at
+            ->whereNull('au.deleted_at')//add deleted_at
+            ->select(
+                'of.denominacion',
+                DB::raw('COUNT(a.id) as total_activos'),
+                DB::raw('SUM(CASE WHEN au.report = 1 THEN 1 ELSE 0 END) as registrados'),
+                DB::raw('SUM(CASE WHEN au.report IS NULL OR au.report = 0 THEN 1 ELSE 0 END) as faltantes')
+            )
+            ->whereRaw("a.codigo REGEXP '^[0-9]+$'")
+            ->groupBy('of.denominacion')
+            ->orderBy('of.denominacion')
+            ->get();
+            $dashboardData = [
+                'activosPorDia'=>$activosPorDia,
+                'activosPorGrupoDia'=>$activosPorGrupoDia,
+                'activosPorOficina'=>$activosPorOficina
+            ];
+
+            return $this->successResponse($dashboardData, 'Datos del dashboard obtenidos exitosamente.');
+        } catch (Exception $e) {
+            Log::error('Error al generar datos del dashboard: ' . $e->getMessage());
+            return $this->handleException($e);
+        }
+    }
+
+    public function store(StoreActivoRequest $request): JsonResponse
+    {
+        DB::beginTransaction();
+        try {
+            $data = $request->validated();
+            Log::info('Datos antes de la inserción:', $data);
+            $activo = Activo::create($data);
+            $user = $request->user();
+            
+            $acta = Acta::create([
+                'numero_acta' => Acta::nextNumero(),
+            ]);
+            
+            $user->activos()->attach($activo->id, [
+                'fecha'=> now(), 
+                'grupo'=>$user->grupo, 
+                'user_id_two'=>$request->user_id_two,
+                'num_acta' => $acta->numero_acta,
+                'origen' => 'acta'
+            ]);
+            DB::commit();
+            return $this->successResponse(
+                new ActivoResource($activo->fresh()),
+                'Activo creado exitosamente',
+                201
+            );
+        } catch (Exception $e) {
+            DB::rollBack();
+            Log::error('Error al crear activo: ' . $e->getMessage());
+            return $this->handleException($e);
+        }
+    }
+
+    public function show(Activo $activo): JsonResponse
+    {
+        try {
+            $activo->load(['catalogo', 'area.oficina.entidad', 'responsable', 'movimientos']);
+            return $this->successResponse(
+                new ActivoResource($activo),
+                'Activo obtenido exitosamente'
+            );
+        } catch (Exception $e) {
+            Log::error('Error al obtener activo: ' . $e->getMessage());
+            return $this->handleException($e);
+        }
+    }
+
+    public function update(UpdateActivoRequest $request, Activo $activo)//: JsonResponse add deleted_at
+    {
+        DB::beginTransaction();
+        try {
+            $validatedData = $request->validated();
+            Log::info('Update activo - year_adquisicion: ' . ($validatedData['year_adquisicion'] ?? 'NULL'));
+            $activo->update($validatedData);
+            $user = $request->user();
+            $activo->update_user = $user->id;
+            
+            $lastRegistro = DB::table('activo_user')
+                ->where('activo_id', $activo->id)
+                ->whereNull('deleted_at')
+                ->orderBy('id', 'desc')
+                ->first();
+            
+            if ($lastRegistro) {
+                DB::table('activo_user')->where('id', $lastRegistro->id)->update(['deleted_at' => now()]);
+            }
+            
+            $numActa = null;
+            if (!$lastRegistro || !$lastRegistro->num_acta) {
+                $acta = Acta::create([
+                    'numero_acta' => Acta::nextNumero(),
+                ]);
+                $numActa = $acta->numero_acta;
+            } else {
+                $numActa = $lastRegistro->num_acta;
+            }
+            
+            $origen = ($user->role_id == 5 || $user->role_id == 2) ? 'acta' : 'inventariado';
+            
+            $user->activos()->attach($activo->id, [
+                'fecha'=> now(), 
+                'grupo'=>$user->grupo, 
+                'user_id_two'=>$request->user_id_two, 
+                'update_user'=>$user->id,
+                'num_acta' => $numActa,
+                'origen' => $origen,
+                'year_adquisicion' => $validatedData['year_adquisicion'] ?? null,
+                'item' => $lastRegistro ? $lastRegistro->item : null,
+                'report' => $lastRegistro ? $lastRegistro->report : false,
+            ]);
+            $activo->save();
+            DB::commit();
+            return $this->successResponse(
+                new ActivoResource($activo->fresh()),
+                'Activo actualizado exitosamente'
+            );
+        } catch (Exception $e) {
+            DB::rollBack();
+            Log::error('Error al actualizar activo: ' . $e->getMessage());
+            return $this->handleException($e);
+        }
+    }
+
+    public function destroy(Activo $activo)
+    {
+        DB::beginTransaction();
+        try {
+            if ( $activo->movimientos()->exists()) {
+                throw new Exception(
+                    'No se puede eliminar el activo porque tiene mantenimientos o movimientos asociados',
+                    409
+                );
+            }
+            $activo->update_user = auth()->id();
+            $activo->save();
+            $activo->delete();
+            
+            DB::commit();
+            return $this->successResponse(
+                null,
+                'Activo eliminado exitosamente'
+            );
+        } catch (Exception $e) {
+            DB::rollBack();
+            Log::error('Error al eliminar activo: ' . $e->getMessage());
+            return $this->handleException($e);
+        }
+    }
+
+    public function movimientos(Activo $activo): JsonResponse
+    {
+        try {
+            $movimientos = $activo->movimientos()->with(['ubicacionOrigen', 'ubicacionDestino'])->get();
+            return $this->successResponse(
+                MovimientoActivoResource::collection($movimientos),
+                'Movimientos del activo obtenidos exitosamente'
+            );
+        } catch (Exception $e) {
+            Log::error('Error al obtener movimientos del activo: ' . $e->getMessage());
+            return $this->handleException($e);
+        }
+    }
+    public function historial(Request $request)
+    {
+        try {
+            $user=User::find($request->user_id);
+            $historial = DB::table('activo_user as au')
+            ->select(
+                'u.name',
+                'ar.aula',
+                'au.grupo',
+                DB::raw('DATE(au.fecha) as fecha'),
+                DB::raw('COUNT(au.activo_id) as total_activos')
+            )
+            ->join('activos as a', 'au.activo_id', '=', 'a.id')
+            ->join('users as u', 'a.responsable_id', '=', 'u.id')
+            ->join('areas as ar', 'a.area_id', '=', 'ar.id')
+            ->where('au.report', true)
+            ->where('au.grupo', $user->grupo)
+            //->where('u.id', $request->user_id)
+            ->where('ar.id', $request->area_id)
+            ->whereNull('a.deleted_at')//add deleted_at
+            ->whereNull('au.deleted_at')//add deleted_at
+            ->groupBy('u.name', 'ar.aula', 'au.grupo', DB::raw('DATE(au.fecha)'))
+            ->orderBy(DB::raw('DATE(au.fecha)'), 'desc');
+            //->where();
+            $user_two=null;
+            if($request->user_id_two){
+                $historial->where('a.responsable_id', $request->responsable_id)->where('au.user_id_two', $request->user_id_two);
+                $user_two=User::find($request->user_id_two);
+            }
+            else{
+                $historial->where('a.responsable_id', $request->responsable_id)->whereNull('au.user_id_two');
+            }
+            return $historial->get();
+        } catch (e) {
+            Log::error('Error al generar datos del dashboard: ' . $e->getMessage());
+            return $this->handleException($e);
+        }
+    }
+    private function crearHistorialActivoUser(int $activoId, array $datos, $user = null): void
+    {
+        $last = DB::table('activo_user')
+            ->where('activo_id', $activoId)
+            ->whereNull('deleted_at')
+            ->orderBy('id', 'desc')
+            ->first();
+
+        if ($last) {
+            DB::table('activo_user')->where('id', $last->id)->update(['deleted_at' => now()]);
+        }
+
+        $data = array_merge($datos, [
+            'activo_id' => $activoId,
+            'fecha' => now(),
+            'user_id' => $last ? $last->user_id : ($user ? $user->id : null),
+            'grupo' => $last ? $last->grupo : ($user ? $user->grupo : null),
+        ]);
+
+        DB::table('activo_user')->insert($data);
+    }
+
+    public function reporteinventario(Request $request)
+    {
+        // crear registro de acta con número secuencial de 3 dígitos
+        $numero_acta = Acta::create([
+            'numero_acta' => Acta::nextNumero(),
+        ]);
+
+        $rules = [
+            'responsable_id' => 'required|integer|exists:users,id',
+            'area_id'        => 'required|integer|exists:areas,id',
+            'id'        => 'required',
+        ];
+
+        $validator = Validator::make($request->all(), $rules);
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Error de validación',
+                'errors'  => $validator->errors()->toArray()
+            ], 422);
+        }
+        $user=User::find($request->id);
+        $today=date('Y-m-d');
+        $activos=DB::table('activo_user as au')
+        ->join('activos as a', 'au.activo_id', '=', 'a.id')
+        ->join('areas as ar', 'a.area_id', '=', 'ar.id')
+        ->join('users as r', 'a.responsable_id', '=', 'r.id')
+        ->where('au.report', false)
+        ->where('a.responsable_id', $request->responsable_id)
+        ->where('a.area_id', $request->area_id)
+        ->where('au.grupo', $user->grupo)
+        ->whereNull('a.deleted_at')//add deleted_at
+        ->whereNull('au.deleted_at')//add deleted_at
+        //->where('au.user_id', $user->id)
+        ->whereIn('au.id', function ($query) {
+            $query->select(DB::raw('MAX(id)'))
+                  ->from('activo_user')
+                  ->whereNull('deleted_at')
+                  ->groupBy('activo_id');
+        })
+        ->select(
+            DB::raw('MAX(au.id) as aux_id'),
+            'au.activo_id as au_a_id',
+            'au.fecha as fecha_registro',
+            'au.report',
+            'au.user_id_two',
+            'au.grupo as grupo',
+            'a.id as a_id',
+            'a.codigo',
+            'a.denominacion',
+            'a.marca',
+            'a.modelo',
+            'a.tipo',
+            'a.numero_serie',
+            'a.dimension',
+            'a.estado',
+            'a.condicion',
+            'a.descripcion',
+            'a.aula as ambiente',
+            'ar.id as ar_id',
+            'ar.aula',
+            'ar.oficina_id',
+            'r.id as r_id',
+            'r.dni as r_dni',
+            'r.name as r_name',
+            'au.item'
+        )
+        ->groupBy('au.activo_id', 'a.id', 'au.grupo', 'r.id', 'ar.id', 'a.codigo', 'a.denominacion',
+        'a.marca', 'a.modelo', 'a.tipo', 'au.user_id_two',
+        'a.numero_serie', 'a.dimension', 'a.estado',
+        'a.condicion', 'a.descripcion', 'ar.aula',
+        'ar.oficina_id', 'r.dni', 'r.name',
+        'au.fecha', 'au.report', 'au.item', 'a.aula')
+        ->orderByRaw('ISNULL(au.item), au.item ASC');
+        //->orderBy('au.item');
+        //->orderBy('ar.id')
+        $user_two=null;
+        if($request->user_id_two){
+            $activos->where('au.user_id_two', $request->user_id_two);
+            $user_two=User::find($request->user_id_two);
+        }
+        else{
+            $activos->whereNull('au.user_id_two');
+        }
+        $activos=$activos->get();
+        $area=Area::find($request->area_id);
+        $total = DB::table('activo_user as au')
+        ->join('activos', 'au.activo_id', '=', 'activos.id')
+        ->join('areas', 'activos.area_id', '=', 'areas.id')
+        ->where('areas.oficina_id', $area->oficina_id)
+        ->where('au.report', true)
+        ->where('au.fecha', '!=', date('Y-m-d'))
+        //->where('au.grupo', $user->grupo)
+        ->count();
+        $index=1;
+        foreach($activos as $activo){
+            $this->crearHistorialActivoUser($activo->au_a_id, [
+                'report' => true,
+                'item' => $total + $index,
+                'origen' => 'acta',
+                'num_acta' => $numero_acta->numero_acta,
+            ], $user);
+            $index++;
+        }
+        if($activos->isEmpty()){
+            return response()->json([
+                'status'=>false,
+                'message'=>"Aun no tienes registros",
+                'data'=>[]
+            ]);
+        }
+        $htmlBody = view('pdf.historial_body', compact('activos', 'total'))->render();
+            $header   = view('pdf.historial_header', compact('activos', 'area', 'user', 'user_two', 'numero_acta'))->render();
+            $footer   = view('pdf.historial_footer', compact('activos', 'user', 'user_two'))->render();
+            $mpdf = new Mpdf([
+                'format' => 'A4-L',
+                'margin_top' => 45,
+                'margin_bottom' => 50,
+            ]);
+            $mpdf->SetHTMLHeader($header);
+            $mpdf->SetHTMLFooter($footer);
+            $mpdf->WriteHTML($htmlBody);
+            return response($mpdf->Output('', 'S'))->header('Content-Type', 'application/pdf');
+    }
+    public function historialPdf(Request $request)
+    {
+        try {
+            $numero_acta = new Acta(['numero_acta' => '______']);
+            $user=User::find($request->user_id);//user
+            $activos=DB::table('activo_user as au')
+            ->join('activos as a', 'au.activo_id', '=', 'a.id')
+            ->join('areas as ar', 'a.area_id', '=', 'ar.id')
+            ->join('users as r', 'a.responsable_id', '=', 'r.id')
+            ->where('au.report', true)
+            ->where('a.responsable_id', $request->responsable_id)
+            ->where('a.area_id', $request->area_id)
+            ->where('au.grupo', $user->grupo)
+            ->whereDate('au.fecha', $request->fecha)
+            //->where(DB::raw('DATE(au.fecha)'), $request->fecha)
+            //->where('au.user_id', $user->id)
+            ->whereNull('a.deleted_at')//add deleted_at
+            ->whereNull('au.deleted_at')//add deleted_at
+            ->whereIn('au.id', function ($query) {
+                $query->select(DB::raw('MAX(id)'))
+                      ->from('activo_user')
+                      ->whereNull('deleted_at')
+                      ->groupBy('activo_id');
+            })
+            ->select(
+                DB::raw('MAX(au.id) as aux_id'),
+                'au.activo_id as au_a_id',
+                'au.fecha as fecha_registro',
+                'au.report',
+                'au.user_id_two',
+                'au.grupo as grupo',
+                'a.id as a_id',
+                'a.codigo',
+                'a.denominacion',
+                'a.marca',
+                'a.modelo',
+                'a.tipo',
+                'a.numero_serie',
+                'a.dimension',
+                'a.estado',
+                'a.condicion',
+                'a.descripcion',
+                'a.aula as ambiente',
+                'ar.id as ar_id',
+                'ar.aula',
+                'ar.oficina_id',
+                'r.id as r_id',
+                'r.dni as r_dni',
+                'r.name as r_name',
+                'au.item'
+            )
+            ->groupBy('au.activo_id', 'a.id', 'au.grupo', 'r.id', 'ar.id', 'a.codigo', 'a.denominacion',
+            'a.marca', 'a.modelo', 'a.tipo', 'au.user_id_two',
+            'a.numero_serie', 'a.dimension', 'a.estado',
+            'a.condicion', 'a.descripcion', 'ar.aula',
+            'ar.oficina_id', 'r.dni', 'r.name',
+            'au.fecha', 'au.report', 'au.item', 'a.aula')
+            ->orderByRaw('ISNULL(au.item), au.item ASC');
+            $user_two=null;
+            if($request->user_id_two){
+                $activos->where('au.user_id_two', $request->user_id_two);
+                $user_two=User::find($request->user_id_two);
+            }
+            else{
+                $activos->whereNull('au.user_id_two');
+            }
+            $activos=$activos->get();
+            $area=Area::find($request->area_id);
+            $total = DB::table('activo_user as au')
+            ->join('activos', 'au.activo_id', '=', 'activos.id')
+            ->join('areas', 'activos.area_id', '=', 'areas.id')
+            ->where('areas.oficina_id', $area->oficina_id)
+            ->where('au.report', true)
+            ->where('au.fecha', '!=', date('Y-m-d'))
+            //->where('au.grupo', $user->grupo)
+            ->count();
+            $index=1;
+            foreach($activos as $activo){
+                if (!$activo->item) {
+                    $this->crearHistorialActivoUser($activo->au_a_id, [
+                        'report' => true,
+                        'item' => $total + $index,
+                        'origen' => 'acta',
+                    ], $user);
+                    $index++;
+                }
+            }
+            if($activos->isEmpty()){
+                return response()->json([
+                    'status'=>false,
+                    'message'=>"Aun no tienes registros",
+                    'data'=>[]
+                ]);
+            }
+            $htmlBody = view('pdf.historial_body', compact('activos', 'total'))->render();
+            $header   = view('pdf.historial_header', compact('activos', 'area', 'user', 'user_two', 'numero_acta'))->render();
+            $footer   = view('pdf.historial_footer', compact('activos', 'user', 'user_two'))->render();
+            $mpdf = new Mpdf([
+                'format' => 'A4-L',
+                'margin_top' => 45,
+                'margin_bottom' => 50,
+            ]);
+            $mpdf->SetHTMLHeader($header);
+            $mpdf->SetHTMLFooter($footer);
+            $mpdf->WriteHTML($htmlBody);
+            return response($mpdf->Output('', 'S'))->header('Content-Type', 'application/pdf');
+        } catch (\Exception $e) {
+            Log::error('Error al generar datos del dashboard: ' . $e->getMessage());
+            return $this->handleException($e);
+        }
+    }
+    public function habilitar(Request $request)
+    {
+        DB::table('activo_user')
+            ->where('activo_id', $request->id)
+            ->update(['report' => false, 'deleted_at' => now(), 'update_user' => auth()->id()]);
+
+        return response()->json([
+            'status'=>true,
+            'message'=>'Registros habilitados correctamente',
+            'data'=>[]
+        ]);
+    }
+    public function reportepdf(Request $request)
+    {
+        $rules = [
+            'responsable_id' => 'required|integer|exists:users,id',
+            'area_id'        => 'required|integer|exists:areas,id',
+            'id'        => 'required',
+        ];
+
+        $validator = Validator::make($request->all(), $rules);
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Error de validación',
+                'errors'  => $validator->errors()->toArray()
+            ], 422);
+        }
+        $user=User::find($request->id);
+        $activos=DB::table('activo_user as au')
+        ->join('activos as a', 'au.activo_id', '=', 'a.id')
+        ->join('areas as ar', 'a.area_id', '=', 'ar.id')
+        ->join('users as r', 'a.responsable_id', '=', 'r.id')
+        ->where('au.report', false)
+        ->where('a.responsable_id', $request->responsable_id)
+        ->where('a.area_id', $request->area_id)
+        //->where('au.fecha', date('Y-m-d'))
+        ->where('au.grupo', $user->grupo)
+        ->whereNull('a.deleted_at')//add deleted_at
+        ->whereNull('au.deleted_at')//add deleted_at
+        ->whereIn('au.id', function ($query) {
+            $query->select(DB::raw('MAX(id)'))
+                  ->from('activo_user')
+                  ->whereNull('deleted_at')
+                  ->groupBy('activo_id');
+        })
+        //->where(function($query) use ($today) {
+        //    $query->where(function($q) use ($today) {
+        //        $q->where('au.report', false); // caso report = false, siempre incluir
+        //    })
+        //    ->orWhere(function($q) use ($today) {
+        //        $q->where('au.report', true)
+        //          ->whereDate('au.fecha', $today); // report = true solo si es hoy
+        //    });
+        //})
+        ->select(
+            DB::raw('MAX(au.id) as aux_id'),
+            'au.activo_id as au_a_id',
+            'au.fecha as fecha_registro',
+            'au.user_id_two',
+            'a.id as a_id',
+            'a.codigo',
+            'a.denominacion',
+            'a.marca',
+            'a.modelo',
+            'a.tipo',
+            'a.numero_serie',
+            'a.dimension',
+            'a.estado',
+            'a.condicion',
+            'a.descripcion',
+            'r.id as r_id',
+            'r.dni as r_dni',
+            'r.name as r_name'
+        )
+        ->groupBy('au.activo_id', 'a.id', 'au.grupo', 'r.id', 'ar.id', 'a.codigo', 'a.denominacion',
+        'a.marca', 'a.modelo', 'a.tipo', 'au.user_id_two',
+        'a.numero_serie', 'a.dimension', 'a.estado',
+        'a.condicion', 'a.descripcion', 'ar.aula',
+        'ar.oficina_id', 'r.dni', 'r.name',
+        'au.fecha', 'au.report', 'au.item')
+        ->orderByRaw('ISNULL(au.item), au.item ASC');
+        //->orderBy('au.item');
+        //->orderBy('ar.id');
+        if($request->user_id_two){
+            $activos->where('au.user_id_two', $request->user_id_two);
+        }
+        else{
+            $activos->whereNull('au.user_id_two');
+        }
+        return $activos->get();
+        $sub = DB::table('activo_user')
+            ->join('activos', 'activo_user.activo_id', '=', 'activos.id')
+            ->join('areas', 'activos.area_id', '=', 'areas.id')
+            ->whereNull('activo_user.deleted_at')//add deleted_at
+            ->whereNull('activos.deleted_at')//add deleted_at
+            ->select(DB::raw('MAX(activo_user.id) as last_id'), 'activos.denominacion', 'areas.oficina_id')
+            ->groupBy('activo_user.activo_id', 'activos.denominacion', 'areas.oficina_id');
+        $activos = DB::table('activo_user as au')
+        ->select(
+            'a.*',
+            'ar.oficina_id',
+            'au.fecha as fecha_registro',
+            'au.report',
+            'au.id as aux_id',
+            'au.grupo as grupo',
+            'r.id as r_id',
+            'r.dni as r_dni',
+            'r.name as r_name',
+        )
+        ->joinSub($sub, 'sub', fn($join) => $join->on('au.id', '=', 'sub.last_id'))
+        ->join('activos as a', 'a.id', '=', 'au.activo_id')
+        ->leftJoin('areas as ar', 'a.area_id', '=', 'ar.id')
+        ->leftJoin('users as r', 'a.responsable_id', '=', 'r.id')
+        //->where('au.user_id', $user->id)
+        ->where('au.grupo', $user->grupo)
+        ->where('au.report', false)
+        ->whereNull('a.deleted_at')//add deleted_at
+        ->whereNull('au.deleted_at')//add deleted_at
+        ->get();
+        $end=$activos->last();
+        $activosFilter = $activos->filter(function($activo) use ($end) {
+            return $activo->area_id == $end->area_id;
+        });
+        $activos=$activosFilter->values();
+        $total = DB::table('activo_user as au')
+        ->join('activos', 'au.activo_id', '=', 'activos.id')
+        ->join('areas', 'activos.area_id', '=', 'areas.id')
+        ->where('areas.oficina_id', $end->oficina_id)
+        ->where('au.report', true)
+        ->where('au.grupo', $user->grupo)
+        ->whereNull('activos.deleted_at')//add deleted_at
+        ->whereNull('au.deleted_at')//add deleted_at
+        ->count();
+        $index=1;
+        foreach($activos as $activo){
+            $this->crearHistorialActivoUser($activo->activo_id, [
+                'report' => true,
+                'item' => $total + $index,
+                'origen' => 'acta',
+            ], $user);
+            $index++;
+        }
+        if($activos->isEmpty()){
+            return "Aun no tienes registros";
+        }
+        $area=Area::find($activos[0]->area_id);
+        $pdf = PDF::loadView('pdf.reporte', [
+            'activos' => $activos,
+            'area'=>$area,
+            'inventariador'=>$user,
+            'total'=>$total
+        ]);
+        $pdf->setPaper('a4', 'landscape');
+        return $pdf->stream('reporete-' . '.pdf');
+    }
+    public function exportActivos()
+    {
+        $response = new StreamedResponse(function () {
+
+        // Abrir salida por streaming
+        echo "\xEF\xBB\xBF";
+        flush();
+        $handle = fopen('php://output', 'w');
+
+        // ENCABEZADOS del CSV
+        fputcsv($handle, [
+            'Código', 'Denominación', 'Marca', 'Modelo', 'Número Serie', 'Piso', 'Aula',
+            'Descripción', 'Teléfono', 'Inventariador', 'Estado', 'Sit',
+            'DNI Usuario', 'Nombre Usuario', 'Código Área', 'Aula Área', 'Código Oficina',
+            'Denominación Oficina', 'Código Edificio', 'Edificio', 'Grupo', 'Item', 'Fecha'
+        ], '|');
+
+        // CONSULTA optimizada para streaming
+        $query = DB::table('activos as a')
+            ->select(
+                'a.codigo', 'a.denominacion', 'a.marca', 'a.modelo', 'a.numero_serie',
+                'a.piso', 'a.aula', 'a.descripcion', 'a.telefono', 'a.nombreInventariador',
+                DB::raw("CASE a.condicion 
+                            WHEN 'N' THEN 'nuevo' 
+                            WHEN 'B' THEN 'bueno' 
+                            WHEN 'R' THEN 'regular' 
+                            WHEN 'M' THEN 'malo' 
+                         END as condicion_nombre"),
+                DB::raw("CASE a.estado 
+                            WHEN 'A' THEN 'U' 
+                            ELSE 'D'
+                         END as estado_ud"),
+                'u.dni as usuario_dni',
+                'u.name as usuario_nombre',
+                'ar.codigo as area_codigo',
+                'ar.aula as area_aula',
+                'ofc.codigo as oficina_codigo',
+                'ofc.denominacion as oficina_denominacion',
+                'ed.codigo as edificio_codigo',
+                'ed.denominacion as edificio_denominacion',
+                'au.grupo',
+                'au.item',
+                'au.fecha'
+            )
+            ->leftjoin('users as u', 'a.responsable_id', '=', 'u.id')
+            ->leftjoin('areas as ar', 'a.area_id', '=', 'ar.id')
+            ->leftjoin('oficinas as ofc', 'ar.oficina_id', '=', 'ofc.id')
+            ->leftjoin('edificios as ed', 'a.edificio_id', '=', 'ed.id')
+            ->leftJoin('activo_user as au', 'a.id', '=', 'au.activo_id')
+            ->whereNull('au.deleted_at')
+            ->orderBy('a.id', 'asc')
+            ->cursor(); // <–– esencial para NO cargar todo en RAM
+
+        // Procesar fila por fila sin usar memoria
+        foreach ($query as $row) {
+
+            fputcsv($handle, [
+                $row->codigo,
+                $row->denominacion,
+                $row->marca,
+                $row->modelo,
+                $row->numero_serie,
+                $row->piso,
+                $row->aula,
+                $row->descripcion,
+                $row->telefono,
+                $row->nombreInventariador,
+                $row->condicion_nombre,
+                $row->estado_ud,
+                $row->usuario_dni,
+                $row->usuario_nombre,
+                $row->area_codigo,
+                $row->area_aula,
+                $row->oficina_codigo,
+                $row->oficina_denominacion,
+                $row->edificio_codigo,
+                $row->edificio_denominacion,
+                $row->grupo,
+                $row->item,
+                $row->fecha
+            ], '|');
+
+            flush(); // imprescindible para liberar memoria
+        }
+
+        fclose($handle);
+    });
+
+    $response->headers->set('Content-Type', 'text/csv');
+    $response->headers->set('Content-Disposition', 'attachment; filename="activos.csv"');
+
+    return $response;
+    }
+    public function reporteSoftwareOTI(Request $request)
+    {
+        try {
+            $rules = [
+                'inventariador_id' => 'required|integer|exists:users,id',
+                'responsable_id' => 'required|integer|exists:users,id',
+                'area_id' => 'required|integer|exists:areas,id',
+                'responsable_software_id' => 'required|integer|exists:users,id',
+            ];
+
+            $validator = Validator::make($request->all(), $rules);
+            if ($validator->fails()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Error de validación',
+                    'errors'  => $validator->errors()->toArray()
+                ], 422);
+            }
+
+            // Obtener usuarios y área para el header
+            $inventariador = User::find($request->inventariador_id);
+            $responsable = User::find($request->responsable_id);
+            $area = Area::with('oficina')->find($request->area_id);
+            $responsableSoftware = User::find($request->responsable_software_id);
+
+            // CONSULTAS REALES A LA BASE DE DATOS - FILTRADAS POR ÁREA Y RESPONSABLE
+
+            // Software de terceros (licencia_terceros)
+            $softwareTerceros = Software::where('tipo', 'licencia_terceros')
+                ->where('area_id', $request->area_id)
+                //->where('responsable_id', $request->responsable_software_id)
+                ->where('responsable_id', $request->responsable_id)
+                ->select(
+                    'codigoA as codigo',
+                    'denominacion',
+                    'nombre',
+                    DB::raw('COALESCE(tipo_licencia, "-") as fuente'),
+                    DB::raw('COALESCE(notas, "-") as observaciones')
+                )
+                ->orderBy('codigoA')
+                ->get();
+            // Software internos (desarrollo_interno)
+            $softwareInternos = Software::where('tipo', 'desarrollo_interno')
+                ->where('area_id', $request->area_id)
+                //->where('responsable_id', $request->responsable_software_id)
+                ->select(
+                    'nombre',
+                    'denominacion',
+                    'estado',
+                    DB::raw('COALESCE(tecnologias, "-") as tecnologias')
+                )
+                ->orderBy('nombre')
+                ->get();
+
+            // Redes sociales (red_social)
+            $redesSociales = Software::where('tipo', 'red_social')
+                ->where('area_id', $request->area_id)
+                //->where('responsable_id', $request->responsable_software_id)
+                ->select(
+                    'nombre',
+                    DB::raw('COALESCE(descripcion, "-") as descripcion'),
+                    'estado',
+                    DB::raw('COALESCE(plataforma, "-") as plataforma')
+                )
+                ->orderBy('nombre')
+                ->get();
+
+            // Renderizar vistas
+            $htmlBody = view('pdf.software_oti_body', compact('softwareTerceros', 'softwareInternos', 'redesSociales'))->render();
+            $header   = view('pdf.software_oti_header', compact('area', 'responsableSoftware', 'responsable'))->render();
+            $footer   = view('pdf.software_oti_footer', compact('inventariador', 'responsable'))->render();
+
+            // Configurar mPDF
+            $mpdf = new Mpdf([
+                'format' => 'A4-L',
+                'margin_top' => 40,
+                'margin_bottom' => 35,
+                'margin_left' => 10,
+                'margin_right' => 10,
+            ]);
+
+            $mpdf->SetHTMLHeader($header);
+            $mpdf->SetHTMLFooter($footer);
+            $mpdf->WriteHTML($htmlBody);
+
+            return response($mpdf->Output('', 'S'))->header('Content-Type', 'application/pdf');
+
+        } catch (\Exception $e) {
+            Log::error('Error al generar reporte de software OTI: ' . $e->getMessage());
+            return $this->handleException($e);
+        }
+    }
+    public function faltaReporte(Request $request){
+        try {
+            $rules = [
+                'inventariador_id' => 'required|integer|exists:users,id'
+            ];
+
+            $validator = Validator::make($request->all(), $rules);
+            if ($validator->fails()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Error de validación',
+                    'errors'  => $validator->errors()->toArray()
+                ], 422);
+            }
+            $user=User::find($request->inventariador_id);
+            $subQuery = DB::table('activo_user')
+                ->select(
+                    'activo_id',
+                    DB::raw('MAX(fecha) as ultima_fecha')
+                )
+                //->where('report', false)  // Filtro de report = 0
+                ->where('user_id', $user->id)
+                ->whereNull('deleted_at')//add deleted_at
+                ->groupBy('activo_id');
+            $historial = DB::table('activo_user as au')
+                ->joinSub($subQuery, 'ultimos', function ($join) {
+                    $join->on('au.activo_id', '=', 'ultimos.activo_id')
+                         ->on('au.fecha', '=', 'ultimos.ultima_fecha');
+                })
+                ->select(
+                    'u.name',
+                    'u.dni',
+                    'ar.aula',
+                    'au.grupo',
+                    //'au.id',
+                    DB::raw('DATE(au.fecha) as fecha'),
+                    DB::raw('COUNT(au.activo_id) as total_activos')
+                )
+                ->join('activos as a', 'au.activo_id', '=', 'a.id')
+                ->join('users as u', 'a.responsable_id', '=', 'u.id')
+                ->join('areas as ar', 'a.area_id', '=', 'ar.id')
+                ->whereNull('a.deleted_at')//add deleted_at
+                ->whereNull('au.deleted_at')//add deleted_at
+                ->groupBy(
+                    'u.name',
+                    'u.dni',
+                    'ar.aula',
+                    'au.grupo',
+                    //'au.id',
+                    DB::raw('DATE(au.fecha)')
+                )
+                ->where('au.report', false)
+                ->orderBy(DB::raw('DATE(au.fecha)'), 'desc');
+            return $historial->get();
+        } catch (\Exception $e) {
+            Log::error('Error al generar reporte de software OTI: ' . $e->getMessage());
+            return $this->handleException($e);
+        }
+    }
+    public function faltaReportePdf(Request $request){
+        try {
+            // crear número de acta secuencial
+            $numero_acta = Acta::create([
+                'numero_acta' => Acta::nextNumero(),
+            ]);
+            $rules = [
+                'inventariador_id' => 'required|integer|exists:users,id',
+                'fecha' => 'required|date',
+                'responsable_dni' => 'required|string|exists:users,dni',
+                'area_aula' => 'required|string|exists:areas,aula',
+            ];
+
+            $validator = Validator::make($request->all(), $rules);
+            if ($validator->fails()) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Error de validación',
+                    'errors'  => $validator->errors()->toArray()
+                ], 422);
+            }
+
+            $user = User::find($request->inventariador_id);
+            $responsable = User::where('dni', $request->responsable_dni)->first();
+            $area = Area::where('aula', $request->area_aula)->first();
+
+            // Construir la consulta para obtener los registros más recientes por activo en la fecha indicada
+            $activosQuery = DB::table('activo_user as au')
+                ->join('activos as a', 'au.activo_id', '=', 'a.id')
+                ->join('areas as ar', 'a.area_id', '=', 'ar.id')
+                ->join('users as r', 'a.responsable_id', '=', 'r.id')
+                ->where('au.report', false)
+                ->where('a.responsable_id', $responsable->id)
+                ->where('a.area_id', $area->id)
+                ->where('au.grupo', $user->grupo)
+                ->whereDate('au.fecha', $request->fecha)
+                ->whereNull('a.deleted_at')//add deleted_at
+                ->whereNull('au.deleted_at')//add deleted_at
+                ->whereIn('au.id', function ($query) {
+                    $query->select(DB::raw('MAX(id)'))
+                          ->from('activo_user')
+                          ->whereNull('deleted_at')
+                          ->groupBy('activo_id');
+                });
+
+            if ($request->user_id_two) {
+                $activosQuery->where('au.user_id_two', $request->user_id_two);
+                $user_two = User::find($request->user_id_two);
+            } else {
+                $activosQuery->whereNull('au.user_id_two');
+                $user_two = null;
+            }
+            $activos = $activosQuery
+                ->select(
+                    DB::raw('MAX(au.id) as aux_id'),
+                    'au.activo_id as au_a_id',
+                    'au.fecha as fecha_registro',
+                    'au.report',
+                    'au.user_id_two',
+                    'au.grupo as grupo',
+                    'a.id as a_id',
+                    'a.codigo',
+                    'a.denominacion',
+                    'a.marca',
+                    'a.modelo',
+                    'a.tipo',
+                    'a.numero_serie',
+                    'a.dimension',
+                    'a.estado',
+                    'a.condicion',
+                    'a.descripcion',
+                    'a.aula as ambiente',
+                    'ar.id as ar_id',
+                    'ar.aula',
+                    'ar.oficina_id',
+                    'r.id as r_id',
+                    'r.dni as r_dni',
+                    'r.name as r_name',
+                    'au.item'
+                )
+                ->groupBy('au.activo_id', 'a.id', 'au.grupo', 'r.id', 'ar.id', 'a.codigo', 'a.denominacion',
+                'a.marca', 'a.modelo', 'a.tipo', 'au.user_id_two',
+                'a.numero_serie', 'a.dimension', 'a.estado',
+                'a.condicion', 'a.descripcion', 'ar.aula',
+                'ar.oficina_id', 'r.dni', 'r.name',
+                'au.fecha', 'au.report', 'au.item', 'a.aula')
+                ->orderByRaw('ISNULL(au.item), au.item ASC')
+                ->get();
+
+            // Calcular total ya reportados en la oficina (para numeración de items)
+            $total = DB::table('activo_user as au')
+                ->join('activos', 'au.activo_id', '=', 'activos.id')
+                ->join('areas', 'activos.area_id', '=', 'areas.id')
+                ->where('areas.oficina_id', $area->oficina_id)
+                ->where('au.report', true)
+                ->where('au.grupo', $user->grupo)
+                ->whereNull('activos.deleted_at')//add deleted_at
+                ->whereNull('au.deleted_at')//add deleted_at
+                ->count();
+
+            $index = 1;
+            foreach ($activos as $activo) {
+                if (!$activo->item) {
+                    $this->crearHistorialActivoUser($activo->au_a_id, [
+                        'report' => true,
+                        'item' => $total + $index,
+                        'origen' => 'acta',
+                    ], $user);
+                    $index++;
+                }
+            }
+
+            if ($activos->isEmpty()) {
+                return response()->json([
+                    'status' => false,
+                    'message' => "Aun no tienes registros",
+                    'data' => []
+                ]);
+            }
+
+            $htmlBody = view('pdf.historial_body', compact('activos', 'total'))->render();
+            $header   = view('pdf.historial_header', compact('activos', 'area', 'user', 'user_two', 'numero_acta'))->render();
+            $footer   = view('pdf.historial_footer', compact('activos', 'user', 'user_two'))->render();
+            $mpdf = new Mpdf([
+                'format' => 'A4-L',
+                'margin_top' => 45,
+                'margin_bottom' => 50,
+            ]);
+            $mpdf->SetHTMLHeader($header);
+            $mpdf->SetHTMLFooter($footer);
+            $mpdf->WriteHTML($htmlBody);
+            return response($mpdf->Output('', 'S'))->header('Content-Type', 'application/pdf');
+        } catch (\Exception $e) {
+            Log::error('Error al generar reporte de software OTI: ' . $e->getMessage());
+            return $this->handleException($e);
+        }
+    }
+// ── Iniciar exportación ──────────────────────────────────────────
+    public function iniciarExport(Request $request)
+    {
+        $filtros = $request->only(['oficina_id', 'area_id', 'search', 'responsable_id', 'ids']);
+        
+        \Illuminate\Support\Facades\Log::info('iniciarExport recibido', [
+            'filtros' => $filtros,
+            'ids_raw' => $filtros['ids'] ?? null,
+        ]);
+        
+        // Si vienen IDs en formato JSON string, decodificarlos
+        if (!empty($filtros['ids'])) {
+            $ids = $filtros['ids'];
+            if (is_string($ids)) {
+                $decoded = json_decode($ids, true);
+                $filtros['ids'] = is_array($decoded) ? $decoded : [];
+            }
+            \Illuminate\Support\Facades\Log::info('ids después de decodificar', [
+                'ids' => $filtros['ids'],
+            ]);
+        }
+
+        $export = Export::create([
+            'user_id' => auth()->id(),
+            'estado'  => 'procesando',
+            'filtros' => $filtros,
+            'mensaje' => 'Preparando exportación...',
+        ]);
+
+        ExportActivosJob::dispatch($export->id, $filtros);
+
+        return response()->json(['export_id' => $export->id], 202);
+    }
+
+    public function exportarActas(Request $request)
+    {
+        $filtros = $request->only(['responsable_id', 'area_id', 'ids']);
+        
+        if (!empty($filtros['ids'])) {
+            $ids = $filtros['ids'];
+            if (is_string($ids)) {
+                $decoded = json_decode($ids, true);
+                $filtros['ids'] = is_array($decoded) ? $decoded : [];
+            }
+        }
+
+        $export = Export::create([
+            'user_id' => auth()->id(),
+            'estado'  => 'procesando',
+            'filtros' => $filtros,
+            'mensaje' => 'Preparando exportación de actas...',
+        ]);
+
+        ExportActasJob::dispatch($export->id, $filtros);
+
+        return response()->json(['export_id' => $export->id], 202);
+    }
+
+// ── Consultar estado ─────────────────────────────────────────────
+public function statusExport(int $id)
+{
+    $export = Export::where('id', $id)
+                    ->where('user_id', auth()->id())
+                    ->firstOrFail();
+
+    $url = null;
+    if ($export->estado === 'completado' && $export->archivo) {
+        if (config('filesystems.default') === 'local') {
+            $url = route('auth.activos.export.download', ['id' => $export->id]);
+        } else {
+            try {
+                $url = Storage::temporaryUrl($export->archivo, now()->addMinutes(30));
+            } catch (\Throwable $e) {
+                $url = route('auth.activos.export.download', ['id' => $export->id]);
+            }
+        }
+    }
+
+    return response()->json([
+        'estado'  => $export->estado,
+        'mensaje' => $export->mensaje,
+        'url'     => $url,
+        'archivo' => $export->archivo,
+    ]);
+}
+
+public function downloadExport(int $id)
+{
+    $export = Export::where('id', $id)
+                    ->where('user_id', auth()->id())
+                    ->firstOrFail();
+
+    if ($export->estado !== 'completado' || !$export->archivo || !Storage::exists($export->archivo)) {
+        abort(404);
+    }
+
+    return Storage::download($export->archivo);
+}
+
+// ── Limpiar export viejo ─────────────────────────────────────────
+public function eliminarExport(int $id)
+{
+    $export = Export::where('id', $id)
+                    ->where('user_id', auth()->id())
+                    ->firstOrFail();
+
+    if ($export->archivo && Storage::exists($export->archivo)) {
+        Storage::delete($export->archivo);
+    }
+
+    $export->delete();
+
+    return response()->json(['ok' => true]);
+}
+
+public function exportarHistorial(Activo $activo)
+{
+    $export = Export::create([
+        'user_id' => auth()->id(),
+        'estado'  => 'procesando',
+        'filtros' => ['activo_id' => $activo->id],
+        'mensaje' => 'Preparando historial del activo...',
+    ]);
+
+    ExportHistorialActivoJob::dispatch($export->id, $activo->id);
+
+    return response()->json(['export_id' => $export->id], 202);
+}
+
+public function historialData(Activo $activo)
+{
+    $registros = DB::table('historial')
+        ->where('activo_id', $activo->id)
+        ->orderBy('anio_de_inventario', 'asc')
+        ->orderBy('id', 'asc')
+        ->get();
+
+    return response()->json([
+        'success' => true,
+        'data'    => $registros,
+    ]);
+}
+public function consultarPorDni(Request $request)
+{
+    $validator = Validator::make($request->all(), [
+        'dni'    => 'required|string|size:8|exists:users,dni',
+    ]);
+
+    if ($validator->fails()) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Datos incorrectos o usuario no encontrado',
+            'errors'  => $validator->errors()
+        ], 422);
+    }
+
+    $user = User::where('dni', $request->dni)->first();
+
+    if (!$user) {
+        return response()->json([
+            'success' => false,
+            'message' => 'No se encontró ningún usuario con esos datos'
+        ], 404);
+    }
+
+    $activos = Activo::with(['area.oficina'])
+        ->where('responsable_id', $user->id)
+        ->whereNull('deleted_at')
+        ->get()
+        ->map(fn($a) => [
+            'id'           => $a->id,
+            'codigo'       => $a->codigo,
+            'denominacion' => $a->denominacion,
+            'marca'        => $a->marca,
+            'modelo'       => $a->modelo,
+            'numero_serie' => $a->numero_serie,
+            'estado'       => $a->estado,
+            'condicion'    => $a->condicion,
+            'oficina'      => $a->area?->oficina?->denominacion,
+            'area'         => $a->area?->aula,
+            'area_obj'     => $a->area,
+        ]);
+
+    return response()->json([
+        'success'    => true,
+        'id' => $user->id,
+        'responsable'=> $user->name,
+        'data'       => $activos
+    ]);
+}
+
+public function consultarPorDniPdf(Request $request)
+{
+    $validator = Validator::make($request->all(), [
+        'dni'    => 'required|string|size:8',
+        'ids'    => 'nullable|array',
+        'ids.*'  => 'integer',
+        'filtros' => 'nullable|array'
+    ]);
+
+    if ($validator->fails()) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Datos incorrectos',
+            'errors'  => $validator->errors()
+        ], 422);
+    }
+
+    $user = User::where('dni', $request->dni)->first();
+    if (!$user) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Usuario no encontrado'
+        ], 404);
+    }
+
+    $query = Activo::with(['area.oficina', 'responsable'])
+        ->where('responsable_id', $user->id)
+        ->whereNull('deleted_at');
+
+    if ($request->ids && count($request->ids) > 0) {
+        $query->whereIn('id', $request->ids);
+    } elseif ($request->filtros) {
+        $f = $request->filtros;
+        if (!empty($f['search'])) {
+            $query->where(function($q) use ($f) {
+                $q->where('codigo', 'like', '%' . $f['search'] . '%')
+                  ->orWhere('denominacion', 'like', '%' . $f['search'] . '%');
+            });
+        }
+        if (!empty($f['area_id'])) {
+            $query->where('area_id', $f['area_id']);
+        }
+        if (!empty($f['oficina_id'])) {
+            $query->whereHas('area', function($q) use ($f) {
+                $q->where('oficina_id', $f['oficina_id']);
+            });
+        }
+    }
+
+    $activos = $query->get();
+
+    if ($activos->isEmpty()) {
+        return response()->json([
+            'success' => false,
+            'message' => 'No hay activos para exportar'
+        ], 404);
+    }
+
+    $logoPath = public_path('images/Logo_UNAP.png');
+    $logo = file_exists($logoPath)
+        ? 'data:image/png;base64,' . base64_encode(file_get_contents($logoPath))
+        : null;
+
+    $movimiento = (object) [
+        'fecha_movimiento' => now(),
+    ];
+
+    $primerActivo = $activos->first();
+    $areaNombre = $primerActivo?->area?->aula ?? '---';
+    $oficinaNombre = $primerActivo?->area?->oficina?->denominacion ?? '---';
+
+    $pdf = PDF::loadView('pdf.consulta_dni_sin_item', [
+        'activos'    => $activos,
+        'user'       => $user,
+        'logo'       => $logo,
+        'movimiento' => $movimiento,
+        'area'       => $areaNombre,
+        'oficina'    => $oficinaNombre,
+    ]);
+    
+    return $pdf->download('bienes_dni_' . $user->dni . '.pdf');
+}
+
+public function consultarPorDniPdfSinItem(Request $request)
+{
+    $validator = Validator::make($request->all(), [
+        'dni'    => 'required|string|size:8',
+        'ids'    => 'nullable|array',
+        'ids.*'  => 'integer'
+    ]);
+
+    if ($validator->fails()) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Datos incorrectos',
+            'errors'  => $validator->errors()
+        ], 422);
+    }
+
+    $user = User::where('dni', $request->dni)->first();
+    if (!$user) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Usuario no encontrado'
+        ], 404);
+    }
+
+    $baseQuery = Activo::with(['area.oficina', 'responsable'])
+        ->where('responsable_id', $user->id)
+        ->whereNull('deleted_at');
+
+    if ($request->ids && count($request->ids) > 0) {
+        $baseQuery->whereIn('id', $request->ids);
+    }
+
+    $activos = $baseQuery->get()->map(function($activo) {
+        $pivot = $activo->users()->first()?->pivot;
+        $pivotItem = $pivot?->item;
+        if ($pivotItem === null || $pivotItem === '') {
+            $activo->num_acta = $pivot?->num_acta;
+            $activo->fecha_acta = $pivot?->fecha;
+            return $activo;
+        }
+        return null;
+    })->filter();
+
+    $primerActivo = $activos->first();
+    $areaNombre = $primerActivo?->area?->aula ?? '---';
+    $oficinaNombre = $primerActivo?->area?->oficina?->denominacion ?? '---';
+    $numActa = $primerActivo?->num_acta ?? '';
+    $fechaActa = $primerActivo?->fecha_acta ? \Carbon\Carbon::parse($primerActivo->fecha_acta)->format('d/m/Y') : '';
+
+    $logoPath = public_path('images/Logo_UNAP.png');
+    $logo = file_exists($logoPath)
+        ? 'data:image/png;base64,' . base64_encode(file_get_contents($logoPath))
+        : null;
+
+    $movimiento = (object) [
+        'fecha_movimiento' => now(),
+    ];
+
+    $pdf = PDF::loadView('pdf.consulta_dni_sin_item', [
+        'activos'    => $activos,
+        'user'       => $user,
+        'logo'       => $logo,
+        'movimiento' => $movimiento,
+        'area'       => $areaNombre,
+        'oficina'    => $oficinaNombre,
+        'num_acta'   => $numActa,
+        'fecha_acta' => $fechaActa,
+    ]);
+    
+    return $pdf->download('bienes_sin_item_' . $user->dni . '.pdf');
+}
+
+public function consultarPorCodigo($codigo)
+{
+    $activo = Activo::with(['area.oficina', 'responsable'])
+        ->where('codigo', $codigo)
+        ->whereNull('deleted_at')
+        ->first();
+
+    if (!$activo) {
+        return response()->json(['message' => 'Activo no encontrado'], 404);
+    }
+
+    return response()->json([
+        'codigo'        => $activo->codigo,
+        'denominacion'  => $activo->denominacion,
+        'responsable'   => $activo->responsable?->name ?? 'Sin responsable',
+        'oficina'       => $activo->area?->oficina?->denominacion ?? 'Sin oficina',
+        'area'          => $activo->area?->aula ?? 'Sin área',
+        'estado'        => $activo->estado,
+        'estado_display'=> $activo->estado_display,
+        'condicion'     => $activo->condicion,
+        'condicion_display' => $activo->condicion_display,
+    ]);
+}
+
+public function importarActivos(Request $request)
+{
+    try {
+        $file = $request->file('archivo');
+        
+        if (!$file) {
+            return response()->json([
+                'success' => false,
+                'message' => 'No se encontró el archivo'
+            ], 400);
+        }
+
+        $data = Excel::toArray(null, $file);
+        $rows = $data[0] ?? [];
+        
+        if (empty($rows)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'El archivo está vacío'
+            ], 400);
+        }
+
+        // Encabezados (primera fila)
+        $headers = array_map(fn($h) => strtolower(trim($h)), $rows[0]);
+        $dataRows = array_slice($rows, 1);
+        
+        $resultados = [
+            'creados' => 0,
+            'actualizados' => 0,
+            'errores' => []
+        ];
+
+        foreach ($dataRows as $index => $row) {
+            $fila = array_combine($headers, $row);
+            $fila = array_map(fn($v) => $v !== null ? trim($v) : null, $fila);
+            
+            try {
+                // Buscar o crear oficina
+                $oficinaId = null;
+                if (!empty($fila['oficina_codigo'])) {
+                    $oficina = \App\Models\Inventariado\Oficina::where('codigo', $fila['oficina_codigo'])->first();
+                    if ($oficina) {
+                        $oficinaId = $oficina->id;
+                    } else {
+                        $oficina = \App\Models\Inventariado\Oficina::create([
+                            'codigo' => $fila['oficina_codigo'],
+                            'denominacion' => $fila['oficina_nombre'] ?? $fila['oficina_codigo'],
+                        ]);
+                        $oficinaId = $oficina->id;
+                    }
+                }
+
+                // Buscar o crear área (verificando que coincida con oficina)
+                $areaId = null;
+                if (!empty($fila['area_codigo']) && $oficinaId) {
+                    $area = \App\Models\Inventariado\Area::where('codigo', $fila['area_codigo'])
+                        ->where('oficina_id', $oficinaId)
+                        ->first();
+                    if ($area) {
+                        $areaId = $area->id;
+                    } else {
+                        $area = \App\Models\Inventariado\Area::create([
+                            'codigo' => $fila['area_codigo'],
+                            'aula' => $fila['area_nombre'] ?? $fila['area_codigo'],
+                            'oficina_id' => $oficinaId,
+                        ]);
+                        $areaId = $area->id;
+                    }
+                }
+
+                // Buscar o crear edificio
+                $edificioId = null;
+                if (!empty($fila['edificio_codigo'])) {
+                    $edificio = Edificio::where('codigo', $fila['edificio_codigo'])->first();
+                    if ($edificio) {
+                        $edificioId = $edificio->id;
+                    } else {
+                        $edificio = Edificio::create([
+                            'codigo' => $fila['edificio_codigo'],
+                            'denominacion' => $fila['edificio_nombre'] ?? $fila['edificio_codigo'],
+                        ]);
+                        $edificioId = $edificio->id;
+                    }
+                }
+
+                // Buscar o crear responsable
+                $responsableId = null;
+                if (!empty($fila['responsable_dni'])) {
+                    $responsable = \App\Models\User::where('dni', $fila['responsable_dni'])->first();
+                    if ($responsable) {
+                        $responsableId = $responsable->id;
+                    } else {
+                        $responsable = \App\Models\User::create([
+                            'dni' => $fila['responsable_dni'],
+                            'name' => $fila['responsable_nombre'] ?? 'Sin nombre',
+                            'email' => $fila['responsable_dni'] . '@unap.edu.pe',
+                        ]);
+                        $responsableId = $responsable->id;
+                    }
+                }
+
+                // Convertir estado y condición a códigos
+                $estadoCodigo = match(strtolower($fila['estado'] ?? '')) {
+                    'activo' => 'A',
+                    'inactivo' => 'I',
+                    default => $fila['estado'] ?? 'A'
+                };
+                
+                $condicionCodigo = match(strtolower($fila['condicion'] ?? '')) {
+                    'nuevo' => 'N',
+                    'bueno' => 'B',
+                    'regular' => 'R',
+                    'malo' => 'M',
+                    default => $fila['condicion'] ?? 'B'
+                };
+
+                // Validar tipo (debe ser AF, AU o ND)
+                $tipoValor = strtoupper(trim($fila['tipo'] ?? ''));
+                $tiposValidos = ['AF', 'AU', 'ND'];
+                if (!in_array($tipoValor, $tiposValidos)) {
+                    $resultados['errores'][] = "Fila " . ($index + 2) . ": El tipo '" . ($fila['tipo'] ?? '') . "' no es válido. Usa: AF (Activo Fijo), AU (Activo Uniforme) o ND (No Definido)";
+                    continue;
+                }
+
+                // Buscar activo por código
+                $activo = Activo::where('codigo', $fila['codigo'] ?? '')->first();
+                
+                $datosActivo = [
+                    'codigo' => $fila['codigo'] ?? '',
+                    'cod_toma' => null,
+                    'denominacion' => $fila['denominacion'] ?? '',
+                    'tipo' => $tipoValor,
+                    'marca' => $fila['marca'] ?? '',
+                    'modelo' => $fila['modelo'] ?? '',
+                    'numero_serie' => $fila['numero_serie'] ?? '',
+                    'dimension' => $fila['dimension'] ?? '',
+                    'aula' => $fila['aula'] ?? '',
+                    'fecha_adquisicion' => $fila['fecha_adquisicion'] ?? null,
+                    'valor_inicial' => $fila['valor_inicial'] ?? 0,
+                    'estado' => $estadoCodigo,
+                    'condicion' => $condicionCodigo,
+                    'descripcion' => $fila['descripcion'] ?? '',
+                    'area_id' => $areaId,
+                    'edificio_id' => $edificioId,
+                    'piso' => $fila['piso'] ?? '',
+                    'responsable_id' => $responsableId,
+                ];
+
+                if ($activo) {
+                    // Actualizar
+                    $activo->update($datosActivo);
+                    $resultados['actualizados']++;
+                } else {
+                    // Crear nuevo
+                    $nuevoActivo = Activo::create($datosActivo);
+                    
+                    // Adjuntar a usuario (importado)
+                    $user = $request->user();
+                    $yearAdq = !empty($fila['year_adquisicion']) ? (int)$fila['year_adquisicion'] : null;
+                    $user->activos()->attach($nuevoActivo->id, [
+                        'fecha' => now(),
+                        'grupo' => $user->grupo,
+                        'origen' => 'importado',
+                        'year_adquisicion' => $yearAdq
+                    ]);
+                    
+                    $resultados['creados']++;
+                }
+
+            } catch (\Exception $e) {
+                $resultados['errores'][] = 'Fila ' . ($index + 2) . ': ' . $e->getMessage();
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+'message' => 'Importación completada',
+            'data' => $resultados
+        ]);
+
+} catch (\Exception $e) {
+        Log::error('Error en importacin: ' . $e->getMessage());
+        return response()->json([
+            'success' => false,
+            'message' => 'Error al importar: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
+public function regularizacion(Request $request)
+{
+    try {
+        $validated = $request->validate([
+            'dato_ref' => 'required|string',
+            'ids' => 'required|array',
+            'ids.*' => 'integer|exists:activos,id',
+            'fecha' => 'nullable|date',
+            'responsable_id' => 'nullable|integer|exists:users,id'
+        ]);
+
+        $user = $request->user();
+        $fechaRegistro = $validated['fecha'] ? Carbon::parse($validated['fecha']) : now();
+
+        foreach ($validated['ids'] as $activoId) {
+            $lastRegistro = DB::table('activo_user')
+                ->where('activo_id', $activoId)
+                ->whereNull('deleted_at')
+                ->orderBy('id', 'desc')
+                ->first();
+
+            if ($lastRegistro) {
+                DB::table('activo_user')->where('id', $lastRegistro->id)->update(['deleted_at' => now()]);
+            }
+
+            $newData = [
+                'fecha' => $fechaRegistro,
+                'origen' => 'regularizacion',
+                'num_acta' => $validated['dato_ref'],
+                'report' => $lastRegistro ? $lastRegistro->report : false,
+                'grupo' => $lastRegistro ? $lastRegistro->grupo : 'DEFAULT',
+                'user_id' => $lastRegistro ? $lastRegistro->user_id : 1,
+                'user_id_two' => $lastRegistro ? $lastRegistro->user_id_two : null,
+                'item' => $lastRegistro ? $lastRegistro->item : null,
+            ];
+
+            DB::table('activo_user')->insert(array_merge($newData, ['activo_id' => $activoId]));
+
+            if (!empty($validated['responsable_id'])) {
+                Activo::where('id', $activoId)->update(['responsable_id' => $validated['responsable_id']]);
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Regularización aplicada a ' . count($validated['ids']) . ' activo(s)'
+        ]);
+    } catch (\Exception $e) {
+        Log::error('Error en regularización: ' . $e->getMessage());
+        return response()->json([
+            'success' => false,
+            'message' => 'Error al regularizar: ' . $e->getMessage()
+        ], 500);
+    }
+}
+}
