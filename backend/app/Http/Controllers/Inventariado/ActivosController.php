@@ -1183,6 +1183,7 @@ class ActivosController extends BaseController
         $filtros = $request->only(['oficina_id', 'area_id', 'search', 'responsable_id', 'ids']);
         
         \Illuminate\Support\Facades\Log::info('iniciarExport recibido', [
+            'user_id' => auth()->id(),
             'filtros' => $filtros,
             'ids_raw' => $filtros['ids'] ?? null,
         ]);
@@ -1195,6 +1196,7 @@ class ActivosController extends BaseController
                 $filtros['ids'] = is_array($decoded) ? $decoded : [];
             }
             \Illuminate\Support\Facades\Log::info('ids después de decodificar', [
+                'user_id' => auth()->id(),
                 'ids' => $filtros['ids'],
             ]);
         }
@@ -1206,7 +1208,18 @@ class ActivosController extends BaseController
             'mensaje' => 'Preparando exportación...',
         ]);
 
+        \Illuminate\Support\Facades\Log::info('Export creado', [
+            'export_id' => $export->id,
+            'user_id' => auth()->id(),
+            'filtros' => $filtros,
+        ]);
+
         ExportActivosJob::dispatch($export->id, $filtros);
+
+        \Illuminate\Support\Facades\Log::info('ExportActivosJob despachado', [
+            'export_id' => $export->id,
+            'user_id' => auth()->id(),
+        ]);
 
         return response()->json(['export_id' => $export->id], 202);
     }
@@ -1223,6 +1236,11 @@ class ActivosController extends BaseController
             }
         }
 
+        \Illuminate\Support\Facades\Log::info('exportarActas recibido', [
+            'user_id' => auth()->id(),
+            'filtros' => $filtros,
+        ]);
+
         $export = Export::create([
             'user_id' => auth()->id(),
             'estado'  => 'procesando',
@@ -1230,7 +1248,18 @@ class ActivosController extends BaseController
             'mensaje' => 'Preparando exportación de actas...',
         ]);
 
+        \Illuminate\Support\Facades\Log::info('Export actas creado', [
+            'export_id' => $export->id,
+            'user_id' => auth()->id(),
+            'filtros' => $filtros,
+        ]);
+
         ExportActasJob::dispatch($export->id, $filtros);
+
+        \Illuminate\Support\Facades\Log::info('ExportActasJob despachado', [
+            'export_id' => $export->id,
+            'user_id' => auth()->id(),
+        ]);
 
         return response()->json(['export_id' => $export->id], 202);
     }
@@ -1238,22 +1267,27 @@ class ActivosController extends BaseController
 // ── Consultar estado ─────────────────────────────────────────────
 public function statusExport(int $id)
 {
+    \Illuminate\Support\Facades\Log::info('statusExport request', [
+        'export_id' => $id,
+        'user_id' => auth()->id(),
+    ]);
+
     $export = Export::where('id', $id)
                     ->where('user_id', auth()->id())
                     ->firstOrFail();
 
     $url = null;
     if ($export->estado === 'completado' && $export->archivo) {
-        if (config('filesystems.default') === 'local') {
-            $url = route('auth.activos.export.download', ['id' => $export->id]);
-        } else {
-            try {
-                $url = Storage::temporaryUrl($export->archivo, now()->addMinutes(30));
-            } catch (\Throwable $e) {
-                $url = route('auth.activos.export.download', ['id' => $export->id]);
-            }
-        }
+        $url = route('auth.activos.export.download', ['id' => $export->id], true);
     }
+
+    \Illuminate\Support\Facades\Log::info('statusExport result', [
+        'export_id' => $export->id,
+        'estado' => $export->estado,
+        'mensaje' => $export->mensaje,
+        'archivo' => $export->archivo,
+        'url' => $url,
+    ]);
 
     return response()->json([
         'estado'  => $export->estado,
@@ -1265,13 +1299,35 @@ public function statusExport(int $id)
 
 public function downloadExport(int $id)
 {
+    \Illuminate\Support\Facades\Log::info('downloadExport request', [
+        'export_id' => $id,
+        'user_id' => auth()->id(),
+    ]);
+
     $export = Export::where('id', $id)
                     ->where('user_id', auth()->id())
                     ->firstOrFail();
 
+    \Illuminate\Support\Facades\Log::info('downloadExport export loaded', [
+        'export_id' => $export->id,
+        'estado' => $export->estado,
+        'archivo' => $export->archivo,
+    ]);
+
     if ($export->estado !== 'completado' || !$export->archivo || !Storage::exists($export->archivo)) {
+        \Illuminate\Support\Facades\Log::warning('downloadExport no disponible', [
+            'export_id' => $export->id,
+            'estado' => $export->estado,
+            'archivo' => $export->archivo,
+            'exists' => Storage::exists($export->archivo),
+        ]);
         abort(404);
     }
+
+    \Illuminate\Support\Facades\Log::info('downloadExport iniciando descarga', [
+        'export_id' => $export->id,
+        'archivo' => $export->archivo,
+    ]);
 
     return Storage::download($export->archivo);
 }

@@ -34,15 +34,29 @@ class ExportActivosJob implements ShouldQueue
         $export = Export::find($this->exportId);
         if (!$export) return;
 
+        Log::info('ExportActivosJob iniciado', [
+            'export_id' => $this->exportId,
+            'filtros' => $this->filtros,
+        ]);
+
         try {
             $archivo = $this->generarExcel();
+
             $export->update([
                 'estado' => 'completado',
                 'archivo' => $archivo,
                 'mensaje' => 'Exportación completada',
             ]);
+
+            Log::info('ExportActivosJob completado', [
+                'export_id' => $this->exportId,
+                'archivo' => $archivo,
+            ]);
         } catch (\Throwable $e) {
-            Log::error('Error en ExportActivosJob: ' . $e->getMessage());
+            Log::error('Error en ExportActivosJob: ' . $e->getMessage(), [
+                'export_id' => $this->exportId,
+                'filtros' => $this->filtros,
+            ]);
             $export->update([
                 'estado' => 'fallido',
                 'mensaje' => 'Error: ' . $e->getMessage(),

@@ -32,6 +32,11 @@ class ExportActasJob implements ShouldQueue
         $export = Export::find($this->exportId);
         if (!$export) return;
 
+        Log::info('ExportActasJob iniciado', [
+            'export_id' => $this->exportId,
+            'filtros' => $this->filtros,
+        ]);
+
         try {
             $archivo = $this->generarExcel();
             $export->update([
@@ -39,8 +44,16 @@ class ExportActasJob implements ShouldQueue
                 'archivo' => $archivo,
                 'mensaje' => 'Exportación completada',
             ]);
+
+            Log::info('ExportActasJob completado', [
+                'export_id' => $this->exportId,
+                'archivo' => $archivo,
+            ]);
         } catch (\Throwable $e) {
-            Log::error('Error en ExportActasJob: ' . $e->getMessage());
+            Log::error('Error en ExportActasJob: ' . $e->getMessage(), [
+                'export_id' => $this->exportId,
+                'filtros' => $this->filtros,
+            ]);
             $export->update([
                 'estado' => 'fallido',
                 'mensaje' => 'Error: ' . $e->getMessage(),

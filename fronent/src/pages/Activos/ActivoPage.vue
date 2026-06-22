@@ -634,6 +634,7 @@ const exportar = async () => {
 
 const exportarActas = async () => {
   try {
+    console.log('=== DEBUG EXPORTAR ACTAS ===')
     loadingAll.value.export = true
     
     let filtros
@@ -641,11 +642,13 @@ const exportarActas = async () => {
     if (seleccionados.value && seleccionados.value.length > 0) {
       const ids = seleccionados.value.map(r => r.id)
       filtros = { ids: ids }
+      console.log('Actas: exportando IDs:', ids)
     } else {
       filtros = {
         responsable_id: userFilter.value ?? null,
         area_id: ubicacionFilter.value?.value ?? null
       }
+      console.log('Actas: exportando con filtros:', filtros)
     }
     
     const localId = Date.now()
@@ -657,11 +660,13 @@ const exportarActas = async () => {
     })
     
     const response = await activoService.iniciarExportActas(filtros)
+    console.log('Actas: iniciarExportActas response:', response)
     
     const export_id = response.export_id || response.data?.export_id
     if (!export_id) {
       throw new Error('No se pudo obtener el ID de exportación')
     }
+    console.log('Actas: export_id obtenido:', export_id)
     
     exportStore.actualizarExport(localId, { export_id, tipo: 'actas' })
     
@@ -670,9 +675,12 @@ const exportarActas = async () => {
     
     const pollExport = async () => {
       try {
+        console.log('Actas: polling statusExport para', export_id, 'intento', intentos + 1)
         const status = await activoService.statusExport(export_id)
+        console.log('Actas: statusExport resultado', status)
         
         if (status.estado === 'completado') {
+          console.log('Actas: exportación completada, descargando URL', status.url)
           exportStore.actualizarExport(localId, {
             estado: 'completado',
             archivo: status.archivo,
@@ -683,16 +691,19 @@ const exportarActas = async () => {
           
           $q.notify({ type: 'positive', message: 'Actas exportadas exitosamente', position: 'top' })
         } else if (status.estado === 'fallido') {
+          console.log('Actas: exportación fallida', status.mensaje)
           exportStore.actualizarExport(localId, {
             estado: 'fallido',
             mensaje: status.mensaje || 'Error en la exportación'
           })
           $q.notify({ type: 'negative', message: 'Error en la exportación de actas', position: 'top' })
         } else {
+          console.log('Actas: estado', status.estado, ', reintentando...')
           if (intentos < maxIntentos) {
             intentos++
             setTimeout(pollExport, 5000)
           } else {
+            console.log('Actas: tiempo de espera agotado para', export_id)
             exportStore.actualizarExport(localId, {
               estado: 'fallido',
               mensaje: 'Tiempo de espera agotado'

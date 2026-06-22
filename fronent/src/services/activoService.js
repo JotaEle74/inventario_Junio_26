@@ -26,24 +26,39 @@ class ActivoService {
         }
     }
     async iniciarExport(filtros) {
-    // El 'this.http.post' ya devuelve el contenido de 'data' gracias a tu adaptador
+    console.log('activoService.iniciarExport:', filtros)
     const response = await this.http.post(`${this.resource}/exportar`, filtros)
-    return response // <--- QUITA EL '.data' AQUÍ
+    console.log('activoService.iniciarExport respuesta:', response)
+    return response
 }
 
     async iniciarExportActas(filtros) {
+    console.log('activoService.iniciarExportActas:', filtros)
     const response = await this.http.post(`${this.resource}/exportar-actas`, filtros)
+    console.log('activoService.iniciarExportActas respuesta:', response)
     return response
 }
 
     async statusExport(exportId) {
+    console.log('activoService.statusExport:', exportId)
     const response = await this.http.get(`${this.resource}/exportar/${exportId}/status`)
+    console.log('activoService.statusExport respuesta:', response)
     return response
 }
 
     async descargarDesdeUrl(url, filename) {
         try {
-            const blob = await this.http.get(url, { responseType: 'blob' })
+            let downloadUrl = url
+            console.log('activoService.descargarDesdeUrl start:', { url, filename })
+            if (downloadUrl.startsWith('/')) {
+                downloadUrl = `${window.location.origin}${downloadUrl}`
+            }
+            if (downloadUrl.startsWith(`${window.location.origin}/api/api`)) {
+                downloadUrl = downloadUrl.replace(`${window.location.origin}/api/api`, `${window.location.origin}/api`)
+            }
+            console.log('activoService.descargarDesdeUrl url final:', downloadUrl)
+
+            const blob = await this.http.get(downloadUrl, { responseType: 'blob' })
             const objectUrl = window.URL.createObjectURL(blob)
             const link = document.createElement('a')
             link.href = objectUrl
@@ -52,6 +67,7 @@ class ActivoService {
             link.click()
             link.remove()
             window.URL.revokeObjectURL(objectUrl)
+            console.log('activoService.descargarDesdeUrl completado:', filename)
         } catch (error) {
             console.error('Error al descargar archivo:', error)
             throw error
@@ -59,12 +75,16 @@ class ActivoService {
     }
 
     async eliminarExport(exportId) {
-        await this.http.delete(`${this.resource}/exportar/${exportId}`)
+        console.log('activoService.eliminarExport:', exportId)
+        const response = await this.http.delete(`${this.resource}/exportar/${exportId}`)
+        console.log('activoService.eliminarExport respuesta:', response)
+        return response
     }
 
     async exportarHistorialActivo(activoId) {
+        console.log('activoService.exportarHistorialActivo:', activoId)
         const response = await this.http.post(`${this.resource}/${activoId}/exportar-historial`)
-        return response
+        console.log('activoService.exportarHistorialActivo respuesta:', response)
     }
 
     async getHistorialActivo(activoId) {
