@@ -1278,7 +1278,8 @@ public function statusExport(int $id)
 
     $url = null;
     if ($export->estado === 'completado' && $export->archivo) {
-        $url = route('auth.activos.export.download', ['id' => $export->id], true);
+        $relativePath = route('auth.activos.export.download', ['id' => $export->id], false);
+        $url = request()->getSchemeAndHttpHost() . $relativePath;
     }
 
     \Illuminate\Support\Facades\Log::info('statusExport result', [

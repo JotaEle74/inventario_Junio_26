@@ -2,12 +2,13 @@ import { boot } from 'quasar/wrappers'
 import { AxiosAdapter } from '../adapters/AxiosAdapter'
 import { inactivityService } from '../services/inactivityService'
 
-if (!process.env.API_URL) {
-    console.warn('API_URL no está definida en las variables de entorno')
+const apiUrl = import.meta.env.VITE_API_URL || ''
+if (!apiUrl) {
+    console.warn('VITE_API_URL no está definida en las variables de entorno')
 }
 
 const httpClient = new AxiosAdapter({
-    baseUrl: process.env.API_URL || '',
+    baseUrl: apiUrl,
     getToken: () => {
         const token = localStorage.getItem('token')
         return token || null

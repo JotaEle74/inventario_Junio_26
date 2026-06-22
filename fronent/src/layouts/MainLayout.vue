@@ -645,16 +645,27 @@ const handleClouse =()=>{
 }
 const ejecutarDescarga = async (exportItem) => {
   try {
-    if (!exportItem.url) {
+    let downloadUrl = exportItem.url
+    console.log(exportItem)
+    if (!downloadUrl && exportItem.export_id) {
+      const status = await activoService.statusExport(exportItem.export_id)
+      downloadUrl = status?.url
+      if (downloadUrl) {
+        exportStore.actualizarExport(exportItem.id, { url: downloadUrl })
+      }
+    }
+
+    if (!downloadUrl) {
       $q.notify({ type: 'negative', message: 'URL no disponible', position: 'top' })
       return
     }
 
-    await activoService.descargarDesdeUrl(exportItem.url, `activos_${Date.now()}.xlsx`)
+    await activoService.descargarDesdeUrl(downloadUrl, `activos_${Date.now()}.xlsx`)
 
     exportStore.actualizarExport(exportItem.id, {
       estado:  'descargado',
       mensaje: 'Descargado · ' + new Date().toLocaleTimeString(),
+      url: downloadUrl,
     })
 
     // Limpiar el archivo del servidor

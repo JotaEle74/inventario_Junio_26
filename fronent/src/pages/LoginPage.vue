@@ -567,7 +567,7 @@ const data = await httpClient.post('/otp/verificar', {
 
     httpClientOtp.value = new AxiosAdapter({
 
-      baseUrl: process.env.API_URL || '',
+      baseUrl: import.meta.env.VITE_API_URL || '',
 
       getToken: () => tokenTemporal.value
 
