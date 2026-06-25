@@ -115,17 +115,17 @@ Route::middleware(['auth:sanctum', 'verified'])->group(function () {
         Route::get('/reporteSoftwareOTI', [ActivosController::class, 'reporteSoftwareOTI']);
         Route::get('/faltareporte', [ActivosController::class, 'faltaReporte']);
         Route::get('/faltareportepdf', [ActivosController::class, 'faltaReportePdf']);
-        Route::get('/{activo}', [ActivosController::class, 'show']);//->middleware('permission:activos.view');
         Route::put('/habilitar', [ActivosController::class, 'habilitar']);
-        Route::put('/{activo}', [ActivosController::class, 'update']);
-        Route::delete('/{activo}', [ActivosController::class, 'destroy']);//->middleware('permission:activos.delete');
         Route::post('/exportar', [ActivosController::class, 'iniciarExport']);
-        Route::get('/exportar/{id}/status', [ActivosController::class, 'statusExport']);
-        Route::get('/exportar/{id}/download', [ActivosController::class, 'downloadExport'])->name('auth.activos.export.download');
-        Route::delete('/exportar/{id}', [ActivosController::class, 'eliminarExport']);
+        Route::get('/exportar/{id}/status', [ActivosController::class, 'statusExport'])->whereNumber('id');
+        Route::get('/exportar/{id}/download', [ActivosController::class, 'downloadExport'])->whereNumber('id')->name('auth.activos.export.download');
+        Route::delete('/exportar/{id}', [ActivosController::class, 'eliminarExport'])->whereNumber('id');
         Route::get('/exportar/historial', [ActivosController::class, 'listarExportaciones']);
-        Route::post('/{activo}/exportar-historial', [ActivosController::class, 'exportarHistorial'])->middleware('permission:historial.export');
-        Route::get('/{activo}/historial-data', [ActivosController::class, 'historialData'])->middleware('permission:historial.view');
+        Route::post('/{activo}/exportar-historial', [ActivosController::class, 'exportarHistorial'])->whereNumber('activo')->middleware('permission:historial.export');
+        Route::get('/{activo}/historial-data', [ActivosController::class, 'historialData'])->whereNumber('activo')->middleware('permission:historial.view');
+        Route::get('/{activo}', [ActivosController::class, 'show'])->whereNumber('activo');//->middleware('permission:activos.view');
+        Route::put('/{activo}', [ActivosController::class, 'update'])->whereNumber('activo');
+        Route::delete('/{activo}', [ActivosController::class, 'destroy'])->whereNumber('activo');//->middleware('permission:activos.delete');
     });
 
     // Historial (importación por cola)
